@@ -1028,39 +1028,7 @@ export default function ManualPcmPlayer({ payload, audioChunks, title, preferenc
             />
           </div>
 
-          {/* Background Music Config */}
-          <div className="flex flex-col gap-2 justify-center col-span-1">
-            <div className="flex justify-between items-center">
-              <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={isBgMusicEnabled}
-                  onChange={(e) => setIsBgMusicEnabled(e.target.checked)}
-                  className="rounded border-slate-300 text-cyan-600 focus:ring-cyan-500 h-3.5 w-3.5 cursor-pointer"
-                />
-                <span>{uiLanguage === "vi" ? "Bật Nhạc Nền Loop" : "Ambient Bg Music"}</span>
-              </label>
-              {isBgMusicEnabled && (
-                <span className="text-xs font-mono font-bold text-cyan-700 bg-cyan-50 border border-cyan-100 rounded-md px-2 py-0.5">
-                  {Math.round(bgMusicVolume * 100)}%
-                </span>
-              )}
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              disabled={!isBgMusicEnabled}
-              value={bgMusicVolume}
-              onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
-              className={`w-full h-2 rounded-lg appearance-none cursor-pointer transition ${
-                isBgMusicEnabled 
-                  ? "bg-slate-100 accent-cyan-500 hover:accent-cyan-600" 
-                  : "bg-slate-50 accent-slate-300 cursor-not-allowed"
-              }`}
-            />
-          </div>
+          {/* Background Music Config Removed */}
         </div>
 
         {/* Sharing Utility Group */}
