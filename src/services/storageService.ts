@@ -4,7 +4,7 @@ const DB_NAME = "CommuteCastDB";
 const STORE_NAME = "briefings_store";
 const VOICE_HISTORY_STORE = "voiceHistory";
 const RSS_FEEDS_STORE = "rssFeeds";
-const DB_VERSION = 7; // Tăng version lên 7 để đồng nhất giữa các service và cập nhật chỉ mục url_idx thành unique: false hoàn toàn
+const DB_VERSION = 7; // Tăng version lên 7 để đảm bảo onupgradeneeded luôn chạy trên tất cả trình duyệt người dùng, giải quyết dứt điểm chỉ mục url_idx
 const MAX_BRIEFINGS_LIMIT = 50; // Tự động xóa bớt khi vượt quá
 const LOCAL_STORAGE_FALLBACK_KEY_VI = "commute_cast_history_vi";
 const LOCAL_STORAGE_FALLBACK_KEY_EN = "commute_cast_history_en";
@@ -17,7 +17,7 @@ export function isIndexedDBSupported(): boolean {
 }
 
 // ================== MỞ KẾT NỐI INDEXEDDB ==================
-function openDB(): Promise<IDBDatabase> {
+export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (!isIndexedDBSupported()) {
       reject(new Error("IndexedDB is not supported on this browser."));
@@ -217,12 +217,13 @@ export async function saveBriefing(briefing: any): Promise<void> {
     }
 
     await new Promise<void>((resolve, reject) => {
-      const request = store.put(normalized);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(new Error("Transaction aborted"));
+      store.put(normalized);
     });
 
-    // Tự động giới hạn số lượng
+    // Tự động giới hạn số lượng - Bây giờ giao dịch ghi đã hoàn thành và khóa được giải phóng
     const all = await getAllBriefings(false);
     if (all.length > MAX_BRIEFINGS_LIMIT) {
       const sorted = [...all].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -485,6 +486,29 @@ export async function saveRSSFeed(feed: RSSFeed): Promise<void> {
 
   try {
     const db = await openDB();
+
+    // Để loại bỏ triệt để khả năng ConstraintError do chỉ mục url_idx cũ (unique: true) còn kẹt trên trình duyệt của máy khách,
+    // ta chủ động kiểm tra nếu có feed nào khác có cùng URL nhưng ID khác, ta sẽ xóa nó đi trước khi lưu mới.
+    const txRead = db.transaction(RSS_FEEDS_STORE, "readonly");
+    const storeRead = txRead.objectStore(RSS_FEEDS_STORE);
+    const existingFeeds = await new Promise<RSSFeed[]>((resolve) => {
+      const req = storeRead.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    const duplicate = existingFeeds.find(f => f.url === feed.url && f.id !== feed.id);
+    if (duplicate) {
+      console.warn(`[IndexedDB Sync] Found duplicate RSS URL: ${feed.url}. Deleting legacy duplicate ${duplicate.id} first to prevent ConstraintError.`);
+      const txDelete = db.transaction(RSS_FEEDS_STORE, "readwrite");
+      const storeDelete = txDelete.objectStore(RSS_FEEDS_STORE);
+      await new Promise<void>((resolve) => {
+        const req = storeDelete.delete(duplicate.id);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+      });
+    }
+
     const tx = db.transaction(RSS_FEEDS_STORE, "readwrite");
     const store = tx.objectStore(RSS_FEEDS_STORE);
     await new Promise<void>((resolve, reject) => {
@@ -493,7 +517,17 @@ export async function saveRSSFeed(feed: RSSFeed): Promise<void> {
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
-    console.warn("Failed to save RSS feed to IndexedDB", err);
+    console.warn("Failed to save RSS feed to IndexedDB, falling back to localStorage", err);
+    try {
+      const current = localStorage.getItem(LOCAL_STORAGE_RSS_KEY);
+      const list = current ? JSON.parse(current) : [];
+      const idx = list.findIndex((f: any) => f.id === feed.id || f.url === feed.url);
+      if (idx > -1) list[idx] = feed;
+      else list.push(feed);
+      localStorage.setItem(LOCAL_STORAGE_RSS_KEY, JSON.stringify(list));
+    } catch (fallbackErr) {
+      console.error("Critical fallback save RSS failed", fallbackErr);
+    }
   }
 }
 

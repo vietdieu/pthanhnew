@@ -623,9 +623,9 @@ app.post("/api/tts", async (req, res): Promise<any> => {
 
     // --- HÀM GỌI GEMINI TTS CHO TỪNG PHÂN ĐOẠN (FAIL-FAST) ---
     const callGeminiTTSForChunkWithRetry = async (chunk: string): Promise<string> => {
-      // Giảm timeout xuống 7 giây và loại bỏ hoàn toàn loop retry để fail-fast lập tức
+      // Tăng timeout lên 35 giây để tránh lỗi timeout non trẻ khi hệ thống tải nặng hoặc khởi động lạnh
       try {
-        return await withTimeout(callGeminiTTSForChunk(chunk), 7000);
+        return await withTimeout(callGeminiTTSForChunk(chunk), 35000);
       } catch (error: any) {
         throw error;
       }
@@ -805,104 +805,81 @@ app.post("/api/tts", async (req, res): Promise<any> => {
       }
     };
 
-    // --- XỬ LÝ SONG SONG THEO CẶP/NHÓM (CONCURRENCY BATCHING VỚI TRẠNG THÁI TOÀN CỤC) ---
-    // Giới hạn chạy song song tối đa 3 tác vụ một lúc để không quá tải API, vẫn đảm bảo tốc độ cực nhanh
-    const concurrency = 3;
+    // --- QUY TRÌNH TỔNG HỢP NHẤT QUÁN & TỰ PHỤC HỒI ---
+    // Để tránh việc trộn lẫn định dạng PCM (Gemini) và MP3 (Edge/Cloud/Translate), tất cả phân đoạn trong một yêu cầu
+    // BẮT BUỘC phải được tổng hợp bởi CÙNG MỘT ENGINE duy nhất. Nếu một engine bị lỗi giữa chừng, hệ thống sẽ tự động
+    // bỏ qua nó và thử lại toàn bộ yêu cầu từ đầu bằng engine dự phòng tiếp theo.
     const now = Date.now();
-    let isGeminiTtsDisabled = now < globalGeminiTtsDisabledUntil;
-    let isGCloudTtsDisabled = now < globalGCloudTtsDisabledUntil;
-    let isEdgeTtsDisabled = now < globalEdgeTtsDisabledUntil;
+    let activeEngine: "gemini" | "gcloud" | "edge" | "translate" = "gemini";
 
-    for (let i = 0; i < chunks.length; i += concurrency) {
-      const batch = chunks.slice(i, i + concurrency);
-      
-      const batchPromises = batch.map(async (chunk, batchIdx) => {
-        const index = i + batchIdx;
-        console.log(`[TTS] Processing chunk ${index + 1}/${chunks.length} ("${chunk.substring(0, 35)}...")`);
-        
-        let base64Audio = "";
-        let geminiErrorMsg = "";
-        let gcloudErrorMsg = "";
-        let edgeErrorMsg = "";
+    if (now < globalGeminiTtsDisabledUntil) {
+      if (now < globalGCloudTtsDisabledUntil) {
+        if (now < globalEdgeTtsDisabledUntil) {
+          activeEngine = "translate";
+        } else {
+          activeEngine = "edge";
+        }
+      } else {
+        activeEngine = "gcloud";
+      }
+    }
 
-        // Bước 1: Thử qua Gemini TTS (Chính chủ) trước
-        if (!isGeminiTtsDisabled && Date.now() >= globalGeminiTtsDisabledUntil) {
-          try {
+    let success = false;
+    let finalAudioBuffers: Buffer[] = [];
+    let attemptsCount = 0;
+
+    while (!success && attemptsCount < 5) {
+      attemptsCount++;
+      console.log(`[TTS] Attempt ${attemptsCount}: Synthesizing all ${chunks.length} segments with engine "${activeEngine}" to prevent format corruption.`);
+      try {
+        finalAudioBuffers = [];
+        for (let index = 0; index < chunks.length; index++) {
+          const chunk = chunks[index];
+          let base64Audio = "";
+
+          if (activeEngine === "gemini") {
             base64Audio = await callGeminiTTSForChunkWithRetry(chunk);
-            console.log(`[TTS] Chunk ${index + 1} synthesized successfully via Gemini.`);
-            audioBuffers[index] = Buffer.from(base64Audio, "base64");
-            return;
-          } catch (geminiError: any) {
-            geminiErrorMsg = geminiError.message || String(geminiError);
-            console.warn(`[TTS] Chunk ${index + 1} failed on Gemini TTS (Error: ${geminiErrorMsg}). Disabling Gemini TTS globally for 5 minutes.`);
-            globalGeminiTtsDisabledUntil = Date.now() + 5 * 60 * 1000; // Khóa toàn cục 5 phút
-            isGeminiTtsDisabled = true;
-          }
-        } else {
-          geminiErrorMsg = "Gemini TTS skipped (globally disabled due to prior error/timeout).";
-        }
-
-        // Bước 2: Thử qua Google Cloud TTS (Dự phòng chất lượng cao 1)
-        if (!isGCloudTtsDisabled && Date.now() >= globalGCloudTtsDisabledUntil) {
-          try {
+          } else if (activeEngine === "gcloud") {
             base64Audio = await callGoogleCloudTTSForChunk(chunk);
-            console.log(`[TTS] Chunk ${index + 1} synthesized successfully via Google Cloud TTS.`);
-            audioBuffers[index] = Buffer.from(base64Audio, "base64");
-            return;
-          } catch (gcloudError: any) {
-            gcloudErrorMsg = gcloudError.message || String(gcloudError);
-            console.warn(`[TTS] Chunk ${index + 1} failed on Google Cloud TTS (Error: ${gcloudErrorMsg}). Disabling Google Cloud TTS globally for 5 minutes.`);
-            globalGCloudTtsDisabledUntil = Date.now() + 5 * 60 * 1000; // Khóa toàn cục 5 phút
-            isGCloudTtsDisabled = true;
-          }
-        } else {
-          gcloudErrorMsg = "Google Cloud TTS skipped (globally disabled).";
-        }
-
-        // Bước 3: Thử qua Edge TTS (Dự phòng miễn phí 2)
-        if (!isEdgeTtsDisabled && Date.now() >= globalEdgeTtsDisabledUntil) {
-          try {
+          } else if (activeEngine === "edge") {
             base64Audio = await callEdgeTTSForChunkWithRetry(chunk);
-            console.log(`[TTS] Chunk ${index + 1} synthesized successfully via Edge TTS.`);
-            audioBuffers[index] = Buffer.from(base64Audio, "base64");
-            return;
-          } catch (edgeError: any) {
-            edgeErrorMsg = edgeError.message || String(edgeError);
-            console.warn(`[TTS] Chunk ${index + 1} failed on Edge TTS (Error: ${edgeErrorMsg}). Disabling Edge TTS globally for 5 minutes.`);
-            globalEdgeTtsDisabledUntil = Date.now() + 5 * 60 * 1000; // Khóa toàn cục 5 phút
-            isEdgeTtsDisabled = true;
+          } else {
+            base64Audio = await callGoogleTranslateTTSForChunk(chunk);
           }
+
+          if (!base64Audio) {
+            throw new Error(`Engine ${activeEngine} returned empty audio data.`);
+          }
+          finalAudioBuffers.push(Buffer.from(base64Audio, "base64"));
+        }
+        success = true; // All segments synthesized successfully with the same engine!
+      } catch (err: any) {
+        const errMsg = err.message || String(err);
+        console.warn(`[TTS] Engine "${activeEngine}" failed during request: ${errMsg}. Automatically discarding and rolling back to next fallback.`);
+
+        if (activeEngine === "gemini") {
+          globalGeminiTtsDisabledUntil = Date.now() + 5 * 60 * 1000; // Disable for 5 mins
+          activeEngine = "gcloud";
+        } else if (activeEngine === "gcloud") {
+          globalGCloudTtsDisabledUntil = Date.now() + 5 * 60 * 1000;
+          activeEngine = "edge";
+        } else if (activeEngine === "edge") {
+          globalEdgeTtsDisabledUntil = Date.now() + 5 * 60 * 1000;
+          activeEngine = "translate";
         } else {
-          edgeErrorMsg = "Edge TTS skipped (globally disabled).";
+          throw new Error(`All voice engines failed to synthesize briefing segment. Last error: ${errMsg}`);
         }
+      }
+    }
 
-        // Bước 4: Thử qua Google Translate TTS (Dự phòng miễn phí cuối cùng - Đảm bảo luôn thành công và cực kỳ nhanh)
-        try {
-          base64Audio = await callGoogleTranslateTTSForChunk(chunk);
-          console.log(`[TTS] Chunk ${index + 1} synthesized successfully via bulletproof Google Translate TTS.`);
-          audioBuffers[index] = Buffer.from(base64Audio, "base64");
-          return;
-        } catch (translateError: any) {
-          const translateErrorMsg = translateError.message || String(translateError);
-          console.error(`[TTS] All engines failed on chunk ${index + 1}.`);
-          throw new Error(
-            `All TTS engines failed for segment ${index + 1}:\n` +
-            `- Gemini TTS: ${geminiErrorMsg}\n` +
-            `- Google Cloud TTS: ${gcloudErrorMsg}\n` +
-            `- Edge TTS: ${edgeErrorMsg}\n` +
-            `- Google Translate TTS: ${translateErrorMsg}`
-          );
-        }
-      });
-
-      // Đợi nhóm hiện tại hoàn thành trước khi chuyển sang nhóm tiếp theo
-      await Promise.all(batchPromises);
+    if (!success || finalAudioBuffers.length === 0) {
+      throw new Error("Could not synthesize audio with any available engine.");
     }
 
     // Nối tất cả các phân đoạn âm thanh thành một file duy nhất
-    console.log(`[TTS] Successfully processed all ${chunks.length} segments. Merging audio buffers...`);
-    const mergedBuffer = Buffer.concat(audioBuffers);
-    console.log(`[TTS] Final merged audio size: ${mergedBuffer.length} bytes.`);
+    console.log(`[TTS] Successfully processed all ${chunks.length} segments using engine "${activeEngine}". Merging audio buffers...`);
+    const mergedBuffer = Buffer.concat(finalAudioBuffers);
+    console.log(`[TTS] Final merged audio size: ${mergedBuffer.length} bytes (Engine: ${activeEngine}).`);
 
     return res.json({ base64Audio: mergedBuffer.toString("base64") });
 

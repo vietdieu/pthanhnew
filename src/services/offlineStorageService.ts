@@ -1,33 +1,10 @@
 import { SavedSummary, SummaryPreferences, SummaryPayload } from "../types";
+import { openDB } from "./storageService";
 
-const DB_NAME = "CommuteCastDB";
 const STORE_NAME = "audios";
-const DB_VERSION = 7;
 
 export function isIndexedDBSupported(): boolean {
   return typeof window !== "undefined" && "indexedDB" in window;
-}
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    if (!isIndexedDBSupported()) {
-      reject(new Error("IndexedDB is not supported on this browser."));
-      return;
-    }
-
-    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = (event: any) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
-        store.createIndex("timestamp_idx", "timestamp", { unique: false });
-      }
-    };
-
-    request.onsuccess = (event: any) => resolve(event.target.result);
-    request.onerror = (event: any) => reject(event.target.error || new Error("Failed to open IndexedDB"));
-  });
 }
 
 /**

@@ -25,6 +25,12 @@ export function useSync() {
       return;
     }
 
+    // Nếu đang trong quá trình tạo/tổng hợp bản tin phát thanh, hoãn đồng bộ để tránh tốn băng thông & giật lag UI
+    if (typeof window !== "undefined" && (window as any).isCommuteCastGeneratingBriefing) {
+      console.log("[useSync] Audio generation is in progress. Deferring sync to prevent performance interference.");
+      return;
+    }
+
     try {
       syncInProgressRef.current = true;
       setSyncStatus("syncing");

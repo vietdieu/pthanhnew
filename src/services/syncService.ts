@@ -192,6 +192,12 @@ export async function processSyncQueueAsync(): Promise<boolean> {
 export async function performFullSyncAsync(): Promise<boolean> {
   if (!isOnline()) return false;
 
+  // Nếu trình duyệt đang tổng hợp âm thanh, hoãn chạy đồng bộ đầy đủ để tránh xung đột băng thông & CPU
+  if (typeof window !== "undefined" && (window as any).isCommuteCastGeneratingBriefing) {
+    console.log("[SyncService] Audio generation is in progress. Deferring full sync.");
+    return false;
+  }
+
   const supabase = await getSupabaseClientAsync();
   if (!supabase) return false;
 

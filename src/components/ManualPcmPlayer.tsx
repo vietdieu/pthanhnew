@@ -161,54 +161,110 @@ export default function ManualPcmPlayer({ payload, audioChunks, title, preferenc
 
   // 1. Initialize audio buffer when chunks change
   useEffect(() => {
-    // Reset player states
-    stopAudio();
-    setIsPlaying(false);
-    setCurrentTime(0);
-    elapsedOffsetRef.current = 0;
+    let active = true;
 
-    const sampleRate = 24000; // gemini-3.1-flash-tts-preview standard output sample rate
+    const initAudio = async () => {
+      if (!audioChunks || audioChunks.length === 0) {
+        setSegmentOffsets([]);
+        setTotalDuration(0);
+        mainBufferRef.current = null;
+        return;
+      }
 
-    try {
-      // Decode each base64 segment check
-      const arrayBuffers = audioChunks.map(chunk => base64ToArrayBuffer(chunk));
-      const floatArrays = arrayBuffers.map(ab => pcmToFloat32(ab));
+      // Reset player states
+      stopAudio();
+      setIsPlaying(false);
+      setCurrentTime(0);
+      elapsedOffsetRef.current = 0;
 
-      // Calculate sizes and offsets
-      let totalSamples = 0;
-      const offsets: { start: number; end: number }[] = [];
+      try {
+        // Create an AudioContext for decoding and playback
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioCtxRef.current = audioCtx;
 
-      floatArrays.forEach((fArray) => {
-        const duration = fArray.length / sampleRate;
-        const startSec = totalSamples / sampleRate;
-        totalSamples += fArray.length;
-        const endSec = totalSamples / sampleRate;
-        offsets.push({ start: startSec, end: endSec });
-      });
+        const decodedBuffers: AudioBuffer[] = [];
 
-      setSegmentOffsets(offsets);
-      setTotalDuration(totalSamples / sampleRate);
+        for (let i = 0; i < audioChunks.length; i++) {
+          if (!active) return;
+          const chunk = audioChunks[i];
+          const arrayBuffer = base64ToArrayBuffer(chunk);
 
-      // Create a single concatenated AudioBuffer
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate });
-      audioCtxRef.current = audioCtx;
+          try {
+            // decodeAudioData consumes the arrayBuffer, so we decode a fresh copy if needed.
+            const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+            decodedBuffers.push(decoded);
+          } catch (decodeErr) {
+            console.warn(`[ManualPcmPlayer] Standard decodeAudioData failed for chunk ${i + 1}, trying raw PCM fallback...`, decodeErr);
+            try {
+              // Fallback: If the chunk is raw headerless PCM, parse manually
+              const rawPCM = base64ToArrayBuffer(chunk);
+              const floatArray = pcmToFloat32(rawPCM);
+              const fallbackBuf = audioCtx.createBuffer(1, floatArray.length, 24000);
+              fallbackBuf.getChannelData(0).set(floatArray);
+              decodedBuffers.push(fallbackBuf);
+            } catch (pcmErr) {
+              console.error(`[ManualPcmPlayer] Fallback PCM decoding also failed for chunk ${i + 1}:`, pcmErr);
+            }
+          }
+        }
 
-      const unifiedBuffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
-      const outputChannel = unifiedBuffer.getChannelData(0);
+        if (!active) return;
+        if (decodedBuffers.length === 0) {
+          throw new Error("No audio chunks could be decoded successfully.");
+        }
 
-      let writeOffset = 0;
-      floatArrays.forEach((fArray) => {
-        outputChannel.set(fArray, writeOffset);
-        writeOffset += fArray.length;
-      });
+        // Calculate sizes, channels, and offsets
+        const sampleRate = decodedBuffers[0].sampleRate;
+        const numberOfChannels = Math.max(...decodedBuffers.map(b => b.numberOfChannels));
+        
+        let totalSamples = 0;
+        const offsets: { start: number; end: number }[] = [];
 
-      mainBufferRef.current = unifiedBuffer;
+        decodedBuffers.forEach((buf) => {
+          const startSec = totalSamples / sampleRate;
+          totalSamples += Math.round(buf.duration * sampleRate);
+          const endSec = totalSamples / sampleRate;
+          offsets.push({ start: startSec, end: endSec });
+        });
 
-    } catch (err) {
-      console.error("Failed to construct audio buffer:", err);
-    }
+        if (!active) return;
+        setSegmentOffsets(offsets);
+        setTotalDuration(totalSamples / sampleRate);
+
+        // Concatenate buffers into a single unified AudioBuffer
+        const unifiedBuffer = audioCtx.createBuffer(numberOfChannels, totalSamples, sampleRate);
+        for (let channel = 0; channel < numberOfChannels; channel++) {
+          const outputChannel = unifiedBuffer.getChannelData(channel);
+          let writeOffset = 0;
+          decodedBuffers.forEach((buf) => {
+            const bufSamples = Math.round(buf.duration * sampleRate);
+            if (channel < buf.numberOfChannels) {
+              const srcData = buf.getChannelData(channel);
+              // If the chunk sample rate matches, copy directly; otherwise, resample slightly or set safely
+              if (srcData.length === bufSamples) {
+                outputChannel.set(srcData, writeOffset);
+              } else {
+                // Safe guard to prevent out-of-bounds
+                const copyLength = Math.min(srcData.length, bufSamples);
+                outputChannel.set(srcData.subarray(0, copyLength), writeOffset);
+              }
+            }
+            writeOffset += bufSamples;
+          });
+        }
+
+        mainBufferRef.current = unifiedBuffer;
+        console.log(`[ManualPcmPlayer] Successfully decoded and concatenated ${decodedBuffers.length} audio segments. Total duration: ${(totalSamples / sampleRate).toFixed(2)}s.`);
+
+      } catch (err) {
+        console.error("Failed to construct audio buffer:", err);
+      }
+    };
+
+    initAudio();
 
     return () => {
+      active = false;
       stopAudio();
     };
   }, [audioChunks]);

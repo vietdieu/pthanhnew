@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { 
   AudioLines, 
   Settings2, 
@@ -337,26 +337,6 @@ export default function App() {
   const [isRssBasedGeneration, setIsRssBasedGeneration] = useState<boolean>(false);
   const [targetNewsTitle, setTargetNewsTitle] = useState<string>("");
 
-  // Parallel Synthesis Tracking States & Refs
-  const [synthesisTimeline, setSynthesisTimeline] = useState<Array<{ label: string; text: string }>>([]);
-  const [synthesizingChunks, setSynthesizingChunks] = useState<Array<{
-    index: number;
-    label: string;
-    text: string;
-    status: "pending" | "processing" | "completed" | "failed" | "stalled";
-    startedAt: number;
-    duration: number;
-  }>>([]);
-
-  const synthesisTimelineRef = useRef<Array<{ label: string; text: string }>>([]);
-  const chunkPromisesRef = useRef<{
-    [index: number]: {
-      resolve: (audioBase64: string) => void;
-      reject: (err: any) => void;
-      abortController?: AbortController;
-    };
-  }>({});
-
   // Active Briefing Payload State
   const [activePayload, setActivePayload] = useState<SummaryPayload | null>(null);
   const [activeAudioChunks, setActiveAudioChunks] = useState<string[]>([]);
@@ -377,20 +357,9 @@ export default function App() {
   }, [isAutoPublish]);
 
   useEffect(() => {
-    if (step !== "synthesizing") return;
-    const interval = setInterval(() => {
-      setSynthesizingChunks((prev) =>
-        prev.map((chunk) => {
-          if (chunk.status === "processing" || chunk.status === "stalled") {
-            const duration = Math.floor((Date.now() - chunk.startedAt) / 1000);
-            const status = duration >= 30 ? "stalled" : chunk.status;
-            return { ...chunk, duration, status };
-          }
-          return chunk;
-        })
-      );
-    }, 1000);
-    return () => clearInterval(interval);
+    if (typeof window !== "undefined") {
+      (window as any).isCommuteCastGeneratingBriefing = (step === "summarizing" || step === "synthesizing");
+    }
   }, [step]);
 
   const getPublicRssUrl = (): string => {
@@ -941,78 +910,8 @@ const handleCreateNews = async (categoryOverride?: string) => {
     }
   };
 
-  const handleRetryChunk = async (index: number) => {
-    const segment = synthesisTimelineRef.current[index];
-    if (!segment) {
-      console.warn("No segment found at index:", index);
-      return;
-    }
-
-    console.log(`[RETRY] Retrying segment ${index + 1}: ${segment.label}`);
-
-    // Abort controller cũ nếu đang chạy
-    if (chunkPromisesRef.current[index]?.abortController) {
-      chunkPromisesRef.current[index].abortController.abort();
-    }
-
-    // Thiết lập trạng thái đang tạo
-    setSynthesizingChunks(prev =>
-      prev.map(c =>
-        c.index === index
-          ? { ...c, status: "processing" as const, startedAt: Date.now(), duration: 0 }
-          : c
-      )
-    );
-
-    const controller = new AbortController();
-    if (chunkPromisesRef.current[index]) {
-      chunkPromisesRef.current[index].abortController = controller;
-    }
-
-    try {
-      const ttsRes = await fetch(getApiUrl("/api/tts"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          text: segment.text,
-          voice: preferences.voice,
-          tone: preferences.tone
-        })
-      });
-
-      if (!ttsRes.ok) {
-        throw new Error(`TTS server error (${ttsRes.status})`);
-      }
-
-      const ttsData = await ttsRes.json();
-      if (!ttsData || !ttsData.base64Audio) {
-        throw new Error("No base64Audio received");
-      }
-
-      // Cập nhật trạng thái thành công
-      setSynthesizingChunks(prev =>
-        prev.map(c => (c.index === index ? { ...c, status: "completed" as const } : c))
-      );
-
-      // Giải quyết Promise gốc để Promise.all tiếp tục chạy mượt mà
-      if (chunkPromisesRef.current[index]) {
-        chunkPromisesRef.current[index].resolve(ttsData.base64Audio);
-      }
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        console.log(`[RETRY] Segment ${index + 1} aborted.`);
-        return;
-      }
-      console.error(`[RETRY] Segment ${index + 1} retry failed:`, err);
-      setSynthesizingChunks(prev =>
-        prev.map(c => (c.index === index ? { ...c, status: "failed" as const } : c))
-      );
-    }
-  };
-
   // Compile full Daily Audio Briefing
-  const handleGenerateBriefing = async (contentOverride?: string) => {
+const handleGenerateBriefing = async (contentOverride?: string) => {
   // Đảm bảo contentOverride là string, nếu không dùng newsContent
   const actualContent = typeof contentOverride === 'string' 
     ? contentOverride 
@@ -1117,31 +1016,74 @@ const handleCreateNews = async (categoryOverride?: string) => {
       { label: uiLanguage === "vi" ? "Phần kết và giao thông" : "Sign-off Outro", text: scriptPayload.conclusion }
     ];
 
-    setSynthesisTimeline(synthesisTimeline);
-    synthesisTimelineRef.current = synthesisTimeline;
+    // Khởi tạo thông báo tiến trình ban đầu
+    setGenerationProgress(
+      uiLanguage === "vi"
+        ? `Bắt đầu tổng hợp song song ${synthesisTimeline.length} phân đoạn âm thanh...`
+        : `Starting parallel synthesis of ${synthesisTimeline.length} audio segments...`
+    );
 
-    // Khởi tạo các phân đoạn âm thanh đang tạo
-    const initialChunks = synthesisTimeline.map((segment, idx) => ({
-      index: idx,
-      label: segment.label,
-      text: segment.text,
-      status: "processing" as const,
-      startedAt: Date.now(),
-      duration: 0,
-    }));
-    setSynthesizingChunks(initialChunks);
-
-    chunkPromisesRef.current = {};
-
-    // Khởi chạy đồng thời tất cả các cuộc gọi TTS sử dụng handleRetryChunk
-    const ttsPromises = synthesisTimeline.map((segment, i) => {
-      return new Promise<string>((resolve, reject) => {
-        chunkPromisesRef.current[i] = {
-          resolve,
-          reject
-        };
-        handleRetryChunk(i);
+    let completedCount = 0;
+    const ttsPromises = synthesisTimeline.map(async (segment, i) => {
+      const ttsRes = await fetch(getApiUrl("/api/tts"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: segment.text,
+          voice: preferences.voice,
+          tone: preferences.tone
+        })
       });
+
+      if (!ttsRes.ok) {
+        let errorMsg = `Voice synthesis failed on track ${segment.label}.`;
+        try {
+          const contentType = ttsRes.headers.get("content-type");
+          if (contentType && contentType.includes("application/json")) {
+            const ttsErr = await ttsRes.json();
+            errorMsg = ttsErr.error || errorMsg;
+          } else {
+            const errorText = await ttsRes.text();
+            if (errorText.includes("QUOTA_LIMIT") || ttsRes.status === 429) {
+              errorMsg = uiLanguage === "vi"
+                ? "QUOTA_LIMIT: Đã hết tài nguyên giọng nói miễn phí của Google TTS (Giới hạn tối đa là 10 lượt gọi mỗi ngày của mô hình thử nghiệm gemini-3.1-flash-tts). Để tiếp tục nghe, bạn hay phát các bản tin mẫu lưu sẵn ở mục 'Lịch sử phát thanh' bên dưới!"
+                : "QUOTA_LIMIT: Daily free-tier limit for experimental voice-synthesis (gemini-3.1-flash-tts) has been reached (max 10 requests per day per project). Please select any archived briefs from the history section below!";
+            } else {
+              errorMsg = `TTS server error (${ttsRes.status}): ${errorText.substring(0, 200)}`;
+            }
+          }
+        } catch {
+          errorMsg = `Voice server returned invalid format (Status ${ttsRes.status}). Maybe rate limits or quotas are temporarily hit.`;
+        }
+        throw new Error(errorMsg);
+      }
+
+      let ttsData;
+      let originalText = "";
+      try {
+        originalText = await ttsRes.text();
+        ttsData = JSON.parse(originalText);
+      } catch (parseErr: any) {
+        throw new Error(uiLanguage === "vi"
+          ? `Mã hóa dữ liệu giọng nói thất bại (Phản hồi không phải JSON hợp lệ).\nChi tiết phản hồi từ máy chủ: ${originalText.slice(0, 200) || parseErr.message}`
+          : `Audio decoding failed (Response is not a valid JSON).\nResponse details from server: ${originalText.slice(0, 200) || parseErr.message}`
+        );
+      }
+
+      if (!ttsData || !ttsData.base64Audio) {
+        throw new Error(uiLanguage === "vi"
+          ? `Không nhận được dữ liệu giọng nói (base64) hợp lệ sau khi tổng hợp track: ${segment.label}.`
+          : `No valid voice audio data received (base64) for track: ${segment.label}.`
+        );
+      }
+
+      completedCount++;
+      const currentProgressLabel = uiLanguage === "vi"
+        ? `Đang tạo âm thanh: [${completedCount}/${synthesisTimeline.length}] - Xong: ${segment.label}`
+        : `Synthesizing audio: [${completedCount}/${synthesisTimeline.length}] - Finished: ${segment.label}`;
+      setGenerationProgress(currentProgressLabel);
+
+      return ttsData.base64Audio;
     });
 
     const chunks = await Promise.all(ttsPromises);
@@ -2003,107 +1945,28 @@ const handleCreateNews = async (categoryOverride?: string) => {
             </div>
           )}
 
-          {step === "synthesizing" && (() => {
-            const completedCount = synthesizingChunks.filter(c => c.status === "completed").length;
-            const totalCount = synthesizingChunks.length || 1;
-            const progressPercentage = Math.round((completedCount / totalCount) * 100);
-            return (
-              <div className="bg-slate-900 text-white p-6 sm:p-8 rounded-3xl border border-slate-800 text-center shadow-2xl flex flex-col items-center justify-center min-h-[310px] w-full animate-fade-in">
-                <div className="relative mb-4 flex justify-center">
-                  <div className="w-14 h-14 rounded-full border-4 border-amber-400 border-t-transparent animate-spin" />
-                  <Volume2 className="w-5 h-5 text-amber-350 absolute top-4.5 animate-bounce" />
-                </div>
-                
-                <h3 className="text-base font-bold">{t.synthesizingTitle}</h3>
-                <p className="text-[11px] text-slate-400 mt-1 max-w-xs leading-relaxed">
-                  {uiLanguage === "vi" 
-                    ? `Đang tổng hợp giọng nói AI song song cho tất cả các phân đoạn bản tin...`
-                    : `Concurrently synthesizing AI voice for all broadcast segments...`}
-                </p>
-
-                {/* Dynamic visual progress bar */}
-                <div className="w-full max-w-sm mt-4">
-                  <div className="flex justify-between text-[10px] text-amber-300 font-bold mb-1">
-                    <span>{uiLanguage === "vi" ? "Tiến trình tổng hợp" : "Synthesis Progress"}</span>
-                    <span>{progressPercentage}% ({completedCount}/{totalCount})</span>
-                  </div>
-                  <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden border border-slate-700/50">
-                    <div 
-                      className="bg-gradient-to-r from-amber-400 to-cyan-400 h-full transition-all duration-300 ease-out" 
-                      style={{ width: `${progressPercentage}%` }}
-                    />
-                  </div>
-                </div>
-
-                {/* Concurrently Generating Segments List with Retry/Timeout states */}
-                <div className="w-full max-w-sm mt-5 text-left border-t border-slate-800/85 pt-4">
-                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2.5">
-                    {uiLanguage === "vi" ? "CHI TIẾT PHÂN ĐOẠN ĐANG TẠO:" : "CONCURRENT GENERATION TRACKS:"}
-                  </span>
-                  <div className="max-h-[160px] overflow-y-auto space-y-1.5 pr-1 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
-                    {synthesizingChunks.map((chunk) => (
-                      <div 
-                        key={chunk.index} 
-                        className="flex items-center justify-between text-xs bg-slate-850/50 hover:bg-slate-850 border border-slate-800/50 px-3 py-2 rounded-xl transition duration-150"
-                      >
-                        <div className="flex flex-col min-w-0 pr-2">
-                          <span className="font-semibold text-slate-200 truncate">{chunk.label}</span>
-                          <span className="text-[9px] text-slate-400 flex items-center gap-1 mt-0.5">
-                            {chunk.status === "completed" && (
-                              <span className="text-emerald-400 font-medium">{uiLanguage === "vi" ? "Đã xong" : "Finished"}</span>
-                            )}
-                            {chunk.status === "processing" && (
-                              <span className="text-amber-400/90">{uiLanguage === "vi" ? `Đang tạo (${chunk.duration}s)...` : `Generating (${chunk.duration}s)...`}</span>
-                            )}
-                            {chunk.status === "stalled" && (
-                              <span className="text-rose-400 font-bold flex items-center gap-0.5">
-                                ⚠️ {uiLanguage === "vi" ? `Bị nghẽn lâu (${chunk.duration}s)` : `Stalled/Slow (${chunk.duration}s)`}
-                              </span>
-                            )}
-                            {chunk.status === "failed" && (
-                              <span className="text-rose-500 font-bold">{uiLanguage === "vi" ? "Lỗi kết nối" : "Fetch error"}</span>
-                            )}
-                          </span>
-                        </div>
-                        
-                        <div className="flex items-center gap-2 shrink-0">
-                          {chunk.status === "completed" && (
-                            <span className="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[9px] font-bold">
-                              ✓
-                            </span>
-                          )}
-                          {chunk.status === "processing" && (
-                            <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-                          )}
-                          {(chunk.status === "stalled" || chunk.status === "failed") && (
-                            <button
-                              onClick={() => handleRetryChunk(chunk.index)}
-                              className="px-2 py-1 bg-amber-400 hover:bg-amber-300 active:bg-amber-500 text-slate-950 font-black text-[9px] rounded-md transition duration-150 cursor-pointer shadow-sm hover:scale-[1.03] active:scale-[0.98]"
-                            >
-                              {uiLanguage === "vi" ? "Thử lại" : "Retry"}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Cancel option button if user wants to back out */}
-                <div className="w-full max-w-sm mt-4 border-t border-slate-800/85 pt-3 flex justify-between items-center">
-                  <span className="text-[10px] text-slate-500 italic">
-                    {uiLanguage === "vi" ? "Tự động khôi phục nếu nghẽn" : "Auto-recovers from stalls"}
-                  </span>
-                  <button
-                    onClick={() => setStep("idle")}
-                    className="text-[10px] font-bold text-rose-400 hover:text-rose-350 hover:underline cursor-pointer"
-                  >
-                    {uiLanguage === "vi" ? "Hủy bỏ tổng hợp" : "Cancel generation"}
-                  </button>
-                </div>
+          {step === "synthesizing" && (
+            <div className="bg-slate-900 text-white p-8 rounded-3xl border border-slate-800 text-center shadow-2xl flex flex-col items-center justify-center min-h-[310px]">
+              <div className="relative mb-6">
+                <div className="w-16 h-16 rounded-full border-4 border-amber-400 border-t-transparent animate-spin" />
+                <Volume2 className="w-6 h-6 text-amber-350 absolute top-5 left-5 animate-bounce" />
               </div>
-            );
-          })()}
+              <h3 className="text-lg font-bold">{t.synthesizingTitle}</h3>
+              <p className="text-xs text-slate-400 mt-2.5 max-w-xs leading-relaxed mb-4">
+                {generationProgress}
+              </p>
+              {(activeTitle || targetNewsTitle) && (
+                <div className="w-full max-w-sm px-4 py-3 bg-slate-800/80 border border-slate-700/60 rounded-2xl text-left animate-fade-in">
+                  <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest block mb-1">
+                    {uiLanguage === "vi" ? "TIÊU ĐỀ BẢN TIN PHÁT THANH:" : "AUDIO BRIEFING TITLE:"}
+                  </span>
+                  <p className="text-xs font-semibold text-slate-150 line-clamp-2 leading-relaxed">
+                    {activeTitle || targetNewsTitle}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {step === "error" && (
             <div className="bg-white p-6 rounded-2xl border border-rose-250 shadow-sm text-center">
