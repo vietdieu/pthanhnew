@@ -378,36 +378,42 @@ export async function performFullSyncAsync(): Promise<boolean> {
     if (err && (err.code === "42P01" || (err.message && err.message.includes("relation") && err.message.includes("does not exist")))) {
       console.warn(
         "⚠️ [Supabase DB Sync] LỖI: Bảng dữ liệu không tồn tại trong cơ sở dữ liệu Supabase của bạn.\n" +
-        "Vui lòng tạo các bảng sau trong Supabase SQL Editor:\n\n" +
-        "1. Bảng 'user_preferences':\n" +
-        "   create table user_preferences (\n" +
-        "     user_id uuid references auth.users not null primary key,\n" +
-        "     preferences jsonb not null default '{}'::jsonb,\n" +
-        "     updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
-        "   );\n\n" +
-        "2. Bảng 'voice_history':\n" +
-        "   create table voice_history (\n" +
-        "     id text primary key,\n" +
-        "     user_id uuid references auth.users not null,\n" +
-        "     query text not null,\n" +
-        "     answer text not null,\n" +
-        "     language text not null,\n" +
-        "     sources jsonb default '[]'::jsonb,\n" +
-        "     timestamp text not null,\n" +
-        "     updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
-        "   );\n\n" +
-        "3. Bảng 'briefings':\n" +
-        "   create table briefings (\n" +
-        "     id text primary key,\n" +
-        "     user_id uuid references auth.users not null,\n" +
-        "     timestamp text not null,\n" +
-        "     preferences jsonb not null,\n" +
-        "     payload jsonb not null,\n" +
-        "     audio_chunks text[] default '{}'::text[],\n" +
-        "     like_count integer default 0,\n" +
-        "     share_count integer default 0,\n" +
-        "     updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
-        "   );\n"
+        "Vui lòng copy và chạy đoạn lệnh sau trong Supabase SQL Editor:\n\n" +
+        "CREATE TABLE IF NOT EXISTS user_preferences (\n" +
+        "  user_id uuid references auth.users not null primary key,\n" +
+        "  preferences jsonb not null default '{}'::jsonb,\n" +
+        "  updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
+        ");\n\n" +
+        "CREATE TABLE IF NOT EXISTS voice_history (\n" +
+        "  id text primary key,\n" +
+        "  user_id uuid references auth.users not null,\n" +
+        "  query text not null,\n" +
+        "  answer text not null,\n" +
+        "  language text not null,\n" +
+        "  sources jsonb default '[]'::jsonb,\n" +
+        "  timestamp text not null,\n" +
+        "  updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
+        ");\n\n" +
+        "CREATE TABLE IF NOT EXISTS briefings (\n" +
+        "  id text primary key,\n" +
+        "  user_id uuid references auth.users not null,\n" +
+        "  timestamp text not null,\n" +
+        "  preferences jsonb not null,\n" +
+        "  payload jsonb not null,\n" +
+        "  audio_chunks text[] default '{}'::text[],\n" +
+        "  like_count integer default 0,\n" +
+        "  share_count integer default 0,\n" +
+        "  updated_at timestamp with time zone default timezone('utc'::text, now()) not null\n" +
+        ");\n\n" +
+        "ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;\n" +
+        "ALTER TABLE voice_history ENABLE ROW LEVEL SECURITY;\n" +
+        "ALTER TABLE briefings ENABLE ROW LEVEL SECURITY;\n\n" +
+        "DROP POLICY IF EXISTS \"Users can manage their own preferences\" ON user_preferences;\n" +
+        "CREATE POLICY \"Users can manage their own preferences\" ON user_preferences FOR ALL USING (auth.uid() = user_id);\n\n" +
+        "DROP POLICY IF EXISTS \"Users can manage their own voice history\" ON voice_history;\n" +
+        "CREATE POLICY \"Users can manage their own voice history\" ON voice_history FOR ALL USING (auth.uid() = user_id);\n\n" +
+        "DROP POLICY IF EXISTS \"Users can manage their own briefings\" ON briefings;\n" +
+        "CREATE POLICY \"Users can manage their own briefings\" ON briefings FOR ALL USING (auth.uid() = user_id);\n"
       );
     }
     return false;

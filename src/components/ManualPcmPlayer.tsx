@@ -302,52 +302,9 @@ export default function ManualPcmPlayer({ payload, audioChunks, title, preferenc
     }
   };
 
-  // Start procedural background ambient music drone
+  // Start procedural background ambient music drone (Completely disabled as requested to prevent any annoying background noise)
   const startBgMusic = () => {
-    if (!audioCtxRef.current || !isBgMusicEnabled) return;
-    stopBgMusic();
-
-    try {
-      if (audioCtxRef.current.state === "suspended") {
-        audioCtxRef.current.resume();
-      }
-
-      const bgGain = audioCtxRef.current.createGain();
-      // Safe low volume background pad loop (weighted by bgMusicVolume and master volume)
-      bgGain.gain.setValueAtTime(bgMusicVolume * volume * 0.12, audioCtxRef.current.currentTime);
-      bgGainRef.current = bgGain;
-      bgGain.connect(audioCtxRef.current.destination);
-
-      // Warm atmospheric drone: A-Major 7th chord elements (A2, C#3, E3, G#3)
-      const freqs = [110.00, 138.59, 164.81, 207.65];
-      const oscs: OscillatorNode[] = [];
-
-      freqs.forEach((freq, idx) => {
-        const osc = audioCtxRef.current!.createOscillator();
-        osc.type = idx % 2 === 0 ? "sine" : "triangle";
-        osc.frequency.setValueAtTime(freq, audioCtxRef.current!.currentTime);
-
-        // Slow pitch LFO to make the chord sound breathing and organic
-        const lfo = audioCtxRef.current!.createOscillator();
-        const lfoGain = audioCtxRef.current!.createGain();
-        lfo.frequency.setValueAtTime(0.1 + idx * 0.05, audioCtxRef.current!.currentTime);
-        lfoGain.gain.setValueAtTime(4, audioCtxRef.current!.currentTime);
-
-        lfo.connect(lfoGain);
-        lfoGain.connect(osc.frequency);
-
-        osc.connect(bgGain);
-
-        lfo.start();
-        osc.start();
-
-        oscs.push(osc);
-      });
-
-      bgOscsRef.current = oscs;
-    } catch (err) {
-      console.warn("Failed to start background music loop:", err);
-    }
+    return;
   };
 
   const stopBgMusic = () => {
